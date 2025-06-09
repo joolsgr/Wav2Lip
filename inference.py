@@ -50,12 +50,6 @@ parser.add_argument('--rotate', default=False, action='store_true',
 parser.add_argument('--nosmooth', default=False, action='store_true',
 					help='Prevent smoothing face detections over a short temporal window')
 
-args = parser.parse_args()
-args.img_size = 96
-
-if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-	args.static = True
-
 def get_smoothened_boxes(boxes, T):
 	for i in range(len(boxes)):
 		if i + T > len(boxes):
@@ -65,9 +59,12 @@ def get_smoothened_boxes(boxes, T):
 		boxes[i] = np.mean(window, axis=0)
 	return boxes
 
-def face_detect(images):
-	detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, 
-											flip_input=False, device=device)
+def face_detect(images, args):
+	# Force CPU for face detection to isolate potential MPS issues with this specific library
+	face_detector_device = 'cpu' 
+	print(f"Using {face_detector_device} for face_detection.FaceAlignment.")
+	detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D,
+											flip_input=False, device=face_detector_device)
 
 	batch_size = args.face_det_batch_size
 	
@@ -75,7 +72,10 @@ def face_detect(images):
 		predictions = []
 		try:
 			for i in tqdm(range(0, len(images), batch_size)):
-				predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
+				image_batch_bgr = images[i:i + batch_size]
+				# Convert images to RGB before passing to detector
+				image_batch_rgb = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in image_batch_bgr]
+				predictions.extend(detector.get_detections_for_batch(np.array(image_batch_rgb)))
 		except RuntimeError:
 			if batch_size == 1: 
 				raise RuntimeError('Image too big to run face detection on GPU. Please use the --resize_factor argument')
@@ -105,14 +105,14 @@ def face_detect(images):
 	del detector
 	return results 
 
-def datagen(frames, mels):
+def datagen(frames, mels, args):
 	img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
 
 	if args.box[0] == -1:
 		if not args.static:
-			face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
+			face_det_results = face_detect(frames, args) # BGR2RGB for CNN face detection
 		else:
-			face_det_results = face_detect([frames[0]])
+			face_det_results = face_detect([frames[0]], args)
 	else:
 		print('Using the specified bounding box instead of face detection...')
 		y1, y2, x1, x2 = args.box
@@ -154,7 +154,12 @@ def datagen(frames, mels):
 		yield img_batch, mel_batch, frame_batch, coords_batch
 
 mel_step_size = 16
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+if torch.backends.mps.is_available():
+    device = 'mps'
+elif torch.cuda.is_available():
+    device = 'cuda'
+else:
+    device = 'cpu'
 print('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
@@ -178,7 +183,7 @@ def load_model(path):
 	model = model.to(device)
 	return model.eval()
 
-def main():
+def main(args):
 	if not os.path.isfile(args.face):
 		raise ValueError('--face argument must be a valid path to video/image file')
 
@@ -222,6 +227,16 @@ def main():
 		args.audio = 'temp/temp.wav'
 
 	wav = audio.load_wav(args.audio, 16000)
+	
+	# Add audio processing parameters
+	args.sample_rate = 16000
+	args.n_fft = 800
+	args.hop_size = 200
+	args.win_size = 800
+	args.fmin = 55
+	args.fmax = 7600
+	args.num_mels = 80
+	
 	mel = audio.melspectrogram(wav)
 	print(mel.shape)
 
@@ -244,7 +259,7 @@ def main():
 	full_frames = full_frames[:len(mel_chunks)]
 
 	batch_size = args.wav2lip_batch_size
-	gen = datagen(full_frames.copy(), mel_chunks)
+	gen = datagen(full_frames.copy(), mel_chunks, args)
 
 	for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
 											total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
@@ -277,4 +292,8 @@ def main():
 	subprocess.call(command, shell=platform.system() != 'Windows')
 
 if __name__ == '__main__':
-	main()
+	args = parser.parse_args()
+	args.img_size = 96
+	if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+		args.static = True
+	main(args)

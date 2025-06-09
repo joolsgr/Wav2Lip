@@ -43,12 +43,25 @@ def linearspectrogram(wav):
     return S
 
 def melspectrogram(wav):
-    D = _stft(preemphasis(wav, hp.preemphasis, hp.preemphasize))
-    S = _amp_to_db(_linear_to_mel(np.abs(D))) - hp.ref_level_db
+    # Use librosa's melspectrogram directly
+    mel = librosa.feature.melspectrogram(
+        y=wav,
+        sr=hp.sample_rate,
+        n_fft=hp.n_fft,
+        hop_length=hp.hop_size,
+        win_length=hp.win_size,
+        n_mels=hp.num_mels,
+        fmin=hp.fmin,
+        fmax=hp.fmax
+    )
     
+    # Convert to dB
+    mel_db = librosa.power_to_db(mel, ref=hp.ref_level_db)
+    
+    # Normalize if needed
     if hp.signal_normalization:
-        return _normalize(S)
-    return S
+        return _normalize(mel_db)
+    return mel_db
 
 def _lws_processor():
     import lws
